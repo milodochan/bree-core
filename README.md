@@ -4,23 +4,13 @@
 
 ## 安装
 
-npm install @company/bree-core
+npm install @layoutkit/bree-core
 
 ## 使用
 
 ```js
-import { Scheduler } from '@company/bree-core';
+import { scheduler } from '@layoutkit/bree-core';
 
-const scheduler = new Scheduler({
-  jobsPath: './jobs'
-});
-
-scheduler.start();
+// 初始化bree任务
+scheduler.init()
 ```
-
-## 打包
-
-npm install
-npm run build
-
-生成 dist/index.js
