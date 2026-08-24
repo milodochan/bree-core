@@ -1,18 +1,15 @@
 import { parentPort, workerData } from 'node:worker_threads'
-import logger from './config/logger.js'
-import redis from './utils/redisUtil.js'
-import database from './utils/databaseUtil.js'
+import createLogger from '../config/createLogger.js'
+import redis from '../utils/redisUtil.js'
+import database from '../utils/databaseUtil.js'
+import hooks from './hooks.js'
 
 export function useHandler() {
     let isCancelled = false
     let db = null
+    const logger = createLogger({ name: workerData?.name || 'worker' })
 
     const getIsCancelled = () => isCancelled
-    const updateTask = async (obj) => {
-        await db('Sys_BreeJobs')
-            .where('ID', workerData.id)
-            .update(obj)
-    }
     const run = async (worker) => {
         if (parentPort)
             parentPort.once('message', (message) => {
@@ -24,15 +21,16 @@ export function useHandler() {
 
         try {
             const result = await worker({ logger, redis, db })
-            await updateTask({ 'ResultStatus': 0, 'ExecuteResult': result })
+            await hooks.registerComplete(db, { id: workerData?.id, result: result })
         } catch (err) {
-            await updateTask({ 'ResultStatus': 1, 'ErrorMessage': err.message })
-            logger.error(`${err?.stack || err?.message || err}`)
+            const message = `${err?.stack || err?.message || err}`
+            await hooks.registerError(db, { id: workerData?.id, error: message })
+            logger.error(message)
         } finally {
             await redis.close()
             await database.close() // 关闭连接池
             if (parentPort) {
-                parentPort.postMessage("done")
+                parentPort.postMessage('done')
             } else {
                 process.exit(0)
             }

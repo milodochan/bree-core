@@ -1,15 +1,16 @@
 import Bree from 'bree'
 import path from 'node:path'
 import fs from 'node:fs'
-import { __dirname } from './utils/path.js'
-import blogger from './config/breeLogger.js'
-import database from './utils/databaseUtil.js'
-
-const projectRoot = path.resolve(__dirname, '../../')
+import { __dirname } from '../utils/path.js'
+import createLogger from '../config/createLogger.js'
+import database from '../utils/databaseUtil.js'
+import hooks from './hooks.js'
 
 let bree = null
 let db = null
 let jobsRoot = null
+
+const logger = createLogger({ name: 'scheduler', split: true })
 
 // 让使用者通过环境变量或配置指定 jobs 目录
 const getJobsRoot = () => {
@@ -53,47 +54,33 @@ const createBree = () => {
     const instance = new Bree({
         hasSeconds: true,
         root: jobsPath,
+        doRootCheck: false, // 任务列表由 hooks.registerLoader / 数据库提供，无需 root/index.js
         errorHandler: async (error, workerMetadata) => {
-            if (workerMetadata?.threadId) {
-                blogger.worker(workerMetadata.name,
-                    `There was an error while running a worker ${workerMetadata.name} with thread ID: ${workerMetadata.threadId}`)
-            } else {
-                blogger.worker(workerMetadata.name,
-                    `There was an error while running a worker ${workerMetadata.name}`)
-            }
-
-            blogger.error(workerMetadata?.name, error)
+            logger.info(`[${workerMetadata.name}] There was an error while running a worker ${workerMetadata.name} with thread ID: ${workerMetadata?.threadId}`)
+            logger.error(`[${workerMetadata?.name}] ${error?.stack || error?.message || error}`)
             if (error?.message?.indexOf('exited with code') > -1) return
             const job = instance.config.jobs.find(x => x.name === workerMetadata?.name)
             const workerData = job?.worker?.workerData
             if (workerData) {
-                await db('Sys_BreeJobs')
-                    .where('ID', workerData.id)
-                    .update({
-                        'ResultStatus': 1,
-                        'ErrorMessage': error?.stack
-                    })
+                await hooks.registerError(db, { id: workerData.id, error: error?.stack })
             }
         }
     })
 
     instance.on('worker created', (name) => {
         console.log('worker created', name)
-        blogger.worker(name, 'worker created')
+        logger.info(name, 'worker created')
     })
 
     instance.on('worker deleted', (name) => {
         console.log('worker deleted', name)
-        blogger.worker(name, 'worker deleted')
+        logger.info(name, 'worker deleted')
     })
 
     return instance
 }
 
-const getBree = () => {
-    return bree
-}
-
+const getBree = () => bree
 const reset = async (job, startStatus) => {
     await bree.stop(job.name)
     const index = bree.config.jobs.findIndex(x => x.name === job.name)
@@ -104,10 +91,8 @@ const reset = async (job, startStatus) => {
 
 const remove = async (name) => {
     await bree.stop(name)
-
     // 删除运行中的 worker 貌似不需要
     // delete bree.workers.get(name)
-
     const index = bree.config.jobs.findIndex(x => x.name === name)
     if (index !== -1) bree.config.jobs.splice(index, 1)
 }
@@ -120,66 +105,20 @@ const create = async (job) => {
 }
 
 // 启动任务
-const start = async (name) => {
-    await bree.start(name)
-}
+const start = async (name) => await bree.start(name)
 // 停止任务
-const stop = async (name) => {
-    await bree.stop(name)
-}
+const stop = async (name) => await bree.stop(name)
 // 执行一次任务
-const run = async (name) => {
-    await bree.run(name)
-}
-
+const run = async (name) => await bree.run(name)
 // 任务初始化
-const init = async () => {
-    // 1. 从数据库读取任务列表
+const register = async (callback) => {
     db = await database.init()
-    // 2. 创建 Bree 实例（在数据库初始化之后）
     bree = createBree()
-    // 3. 从数据库读取任务列表
-    const jobs = await db('Sys_BreeJobs') //.where('Status', 1)
-    // 4. 批量注册到调度器
-    for (const job of jobs) {
-        const id = job['ID']
-        const name = job['Name']
-        const cron = job['Cron']
-        const path = job['Path']
-        const status = job['Status'] // status 状态为0：已停止 1：执行中 2：
-        const createStatus = job['CreateStatus']
-
-        try {
-            await create({
-                name,
-                cron,
-                path: path || undefined,
-                worker: { workerData: { id } }
-            })
-
-            if (status === 1) await bree.start(name)
-            if (createStatus === 0) {
-                await db('Sys_BreeJobs')
-                    .where('ID', id)
-                    .update({
-                        'CreateStatus': 1
-                    })
-            }
-        }
-        catch (error) {
-            blogger.error(name, error)
-            await db('Sys_BreeJobs')
-                .where('ID', id)
-                .update({
-                    'ResultStatus': 1,
-                    'ErrorMessage': error?.stack
-                })
-        }
-    }
+    await callback(db)
 }
 
 export default {
-    init,
+    register,
     create,
     reset,
     start,

@@ -1,4 +1,4 @@
-import aes from "../utils/AesUtil.js"
+import aes from "../utils/aesUtil.js"
 
 export function auth(req, res, next) {
     const apiKey = req.headers['x-api-key']

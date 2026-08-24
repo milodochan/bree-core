@@ -1,27 +1,8 @@
-import winston from 'winston'
-import 'winston-daily-rotate-file'
+import { createLogger } from './createLogger.js'
 
-const { combine, timestamp, printf } = winston.format
-const logFormat = printf(({ timestamp, level, message }) => {
-    return `[${timestamp}] [${level.toUpperCase()}] ${message}`
-})
-
-const weixinLogger = winston.createLogger({
-    level: 'info',
-    format: combine(
-        timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-        logFormat
-    ),
-    transports: [
-        new winston.transports.Console(),
-        new winston.transports.DailyRotateFile({
-            dirname: 'logs',
-            filename: 'weixinapi-%DATE%.log',
-            datePattern: 'YYYY-MM-DD',
-            maxSize: '20m',
-            maxFiles: '30d'
-        })
-    ]
+// 可以删除 使用的地方自己写
+const weixinLogger = createLogger({
+    name: 'weixinapi'
 })
 
 /**

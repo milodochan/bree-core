@@ -14,6 +14,7 @@ export default {
     ],
     external: [
         'bree',
+        'express',
         'knex',
         'mssql',
         'redis',
