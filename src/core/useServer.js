@@ -20,7 +20,9 @@ const loadRouteFiles = async (dirs, logger) => {
         try {
             entries = await readdir(abs, { withFileTypes: true })
         } catch {
-            continue // 目录不存在则跳过
+            // 目录不存在则跳过，但给出提示便于诊断路由未加载
+            logger?.warn?.(`routes dir not found, skipped: ${abs}`)
+            continue
         }
 
         const walk = async (items, base) => {
@@ -80,9 +82,10 @@ const createCors = (options = {}) => {
  * @param {boolean} [options.trustProxy=true] 是否信任代理（影响 req.ip）
  * @param {function|Array<{method:string,path:string,handler:function|function[]}>} [options.routes=null]
  *        路由注册：函数 (app) => {...} 或路由配置数组；也可省略，用 route() 定义即自动注册
- * @param {string|string[]|false} [options.routesDir='routes'] 路由文件目录（相对 cwd 或绝对路径），
+ * @param {string|string[]|false} [options.routesDir=['routes','src/routes']] 路由文件目录（相对 cwd 或绝对路径），
  *        start() 时自动递归扫描并加载其中所有 JS 文件（触发 route() 自动注册），无需手动 import；
- *        传 false 关闭扫描；可传数组扫描多个目录
+ *        默认同时扫描 'routes' 与 'src/routes' 两个候选目录（存在哪个扫哪个）；
+ *        传 false 关闭扫描；传数组可自定义多个目录
  * @returns {{ app, start, stop, getServer }}
  */
 export function useServer(options = {}) {
@@ -98,7 +101,7 @@ export function useServer(options = {}) {
         health = true,
         trustProxy = true,
         routes = null,
-        routesDir = 'routes'
+        routesDir = ['routes', 'src/routes']
     } = options
 
     const app = express()

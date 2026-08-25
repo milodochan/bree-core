@@ -1,223 +1,358 @@
-# bree-core
+# @layoutkit/bree-core
 
-内部 Bree 调度封装包。
+可复用的 Bree 任务调度 + Express 服务核心包，内置数据库、Redis、日志、认证、Excel、邮件等开箱即用能力。
+
+基于 **worker_threads**：任务在独立线程中执行，主进程负责调度与状态回写。
 
 ## 安装
 
+```bash
 npm install @layoutkit/bree-core
-
-## 使用
-
-```js
-import { scheduler } from '@layoutkit/bree-core';
-
-// 初始化bree任务（默认从任务表读取任务，表名默认 Sys_BreeJobs）
-scheduler.init()
 ```
 
-**任务表配置**：
+需自行安装 peer 依赖（`bree`、`express`、`knex`、`mssql`、`redis`、`winston`、`winston-daily-rotate-file`、`exceljs`、`nodemailer`、`dotenv`）。
 
-```js
-// scheduler：默认从任务表读取任务（表名默认 Sys_BreeJobs），也可通过钩子交给引用项目
-scheduler.init({
-    listJobs: async () => await myDb('My_Jobs'),                    // 钩子：读取任务列表
-    updateJob: async (id, patch) => await myDb('My_Jobs').where('ID', id).update(patch)   // 钩子：更新任务字段
-});
+## 目录结构约定
+
+```
+项目根/
+├── app.js                 # 主进程：注册 hooks、scheduler、useServer
+├── jobs/                  # 任务目录（也支持 src/jobs 或 dist/jobs）
+│   └── test.js            # 任务文件：useHandler().run(业务函数)
+├── routes/                # 路由目录（useServer 自动扫描，也支持 src/routes）
+│   └── user.js
+└── .env                   # 环境变量（数据库、Redis、认证等）
 ```
 
-**公用钩子**（`hooks`）：集中配置任务状态回写等扩展点，在应用入口（如 `app.js`）赋值一次全局生效，后续新增钩子只需在 `src/core/hooks.js` 扩展字段：
+## 快速开始
+
+### 1. 主进程 `app.js` —— 注册 hooks 并启动调度器
 
 ```js
-// ===== app.js（应用入口，配置一次全局生效）=====
-import { hooks } from '@layoutkit/bree-core';
+import dotenv from 'dotenv'
+dotenv.config()
 
-// 任务成功回写（obj: { id, ResultStatus: 0, ExecuteResult }）
-hooks.registerComplete = async (db, obj) => {
-    await db('My_Jobs').where('id', obj.id).update('ExecuteResult', obj.ExecuteResult);
-};
+import { scheduler, hooks, useServer } from '@layoutkit/bree-core'
 
-// 任务失败回写（obj: { id, ResultStatus: 1, ErrorMessage }）
-hooks.registerError = async (db, obj) => {
-    await db('My_Jobs').where('id', obj.id).update('ErrorMessage', obj.ErrorMessage);
-};
+// ===== hooks：状态回写（在主进程执行，直接赋值即生效）=====
 
-// registerLoader：任务加载钩子（预留给 scheduler 使用，暂未接入）
+// 任务列表：从数据库读取并注册到调度器
+hooks.registerLoader = async (db, logger) => {
+    const jobs = await db('My_Jobs').where('Enabled', true)
+    for (const job of jobs) {
+        await scheduler.create({
+            name: job.Name,                 // 对应 jobs/<Name>.js
+            interval: job.Interval,         // 如 '5 minutes' / '*/10 * * * * *'
+            workerData: { id: job.ID },     // 回写时用业务主键 ID
+        })
+    }
+}
+
+// 任务成功：worker 通过 postMessage 传回结果，主进程统一回写
+hooks.registerComplete = async (db, { id, result }) => {
+    await db('My_Jobs').where('ID', id).update({ Status: 'done', Result: JSON.stringify(result) })
+}
+
+// 任务失败：bree errorHandler 捕获后统一回写
+hooks.registerError = async (db, { id, error }) => {
+    await db('My_Jobs').where('ID', id).update({ Status: 'error', Error: error })
+}
+
+// ===== 启动调度器 =====
+await scheduler.register()
+
+// ===== 启动 HTTP 服务（可选）=====
+const { app } = useServer({ port: 3000, auth: false })
+await app.start()
 ```
 
-**worker 状态回写**（`useHandler`，无需传参）：
+### 2. 任务文件 `jobs/test.js` —— worker 线程内
 
 ```js
-// ===== jobs/xxx.js（worker 文件，正常使用）=====
-import { useHandler } from '@layoutkit/bree-core';
+import { useHandler } from '@layoutkit/bree-core'
 
-const { run } = useHandler();
+const { run, getIsCancelled } = useHandler()
 
-await run(async ({ logger, redis, db }) => {
-    // ...业务逻辑...
-    return result;  // 成功自动回调 hooks.registerComplete
-    // 抛错自动回调 hooks.registerError
-});
+const test = async ({ logger, redis, db }) => {
+    logger.info('任务开始')
+
+    // 业务逻辑（可访问注入的 logger / redis / db）
+    const count = await db('HI_User').count()
+    await redis.set('lastCount', count, 3600)
+
+    // 支持优雅取消：scheduler.stop('test') 后提前退出
+    if (getIsCancelled()) return { cancelled: true }
+
+    return { ok: true, count }   // 会通过 postMessage 回传给主进程
+}
+
+run(test)
 ```
 
-> 未配置对应钩子时该次回写将被跳过。
+### 3. 启动
 
-## 日志
+```bash
+node app.js
+```
 
-内置 logger（info / worker / weixinapi），也可通过 `createLogger` 按参数创建：
+## 环境变量
+
+| 变量 | 用途 | 示例 |
+| --- | --- | --- |
+| `DB_CONNECTION_STRING` | SQL Server 连接串 | `user=sa;password=123;server=127.0.0.1;database=mydb` |
+| `DB_AES_KEY` | 可选，连接串为 AES 密文时用于解密 | `16/24/32字节密钥` |
+| `REDIS_HOST` / `REDIS_PORT` | Redis 地址 | `127.0.0.1` / `6379` |
+| `REDIS_USERNAME` / `REDIS_PASSWORD` | Redis 账号密码（可选） | |
+| `REDIS_DB` | Redis 库号（默认 0） | `0` |
+| `MAIL_HOST` / `MAIL_PORT` / `MAIL_ACCOUNT` / `MAIL_PASSWORD` / `MAIL_USERNAME` | SMTP 配置（MAIL_PASSWORD 为授权码） | |
+| `API_SECRET_KEY` | 认证 AES 密钥 | 16/24/32字节 |
+| `API_TOKEN` | 认证明文 token | |
+| `API_SECRET_KEY_NAME` | 认证请求头名 | `x-api-key` |
+| `ALLOW_IPS` | IP 白名单（逗号分隔） | `127.0.0.1,192.168.1.1` |
+| `LOG_DIR` | 日志根目录（默认项目下 `logs`） | `/var/log` |
+| `BREE_JOBS_PATH` | 任务目录（不设则自动找 `src/jobs` / `jobs` / `dist/jobs`） | `./jobs` |
+
+## 任务调度
+
+### 数据流
+
+```
+主进程                                   worker 线程 (jobs/<name>.js)
+───────                                  ────────────────────────────
+scheduler.register()
+  └─ hooks.registerLoader(db, logger)     ┌─────────────────────────┐
+      └─ scheduler.create(job)            │ useHandler().run(业务)  │
+scheduler.start('test') / run('test') ──▶ │   ├─ worker({logger,    │
+      │                                  │   │      redis, db})    │
+      ▼                                  │   └─ postMessage(done)  │
+worker created ─────────────────────────▶└─────────────────────────┘
+      │
+worker message { type:'done', data }
+  └─ hooks.registerComplete(db, { id, result })
+
+worker 抛错 ──▶ bree errorHandler
+  └─ hooks.registerError(db, { id, error })
+```
+
+### hooks —— 状态回写钩子
+
+hooks 是主进程共享对象，包含三个钩子，**直接赋值即生效**：
 
 ```js
-import winston from 'winston';
-import { createLogger } from '@layoutkit/bree-core';
-
-const { printf } = winston.format;
-
-const myLogger = createLogger({
-    name: 'myapp',          // 文件名前缀 -> myapp-%DATE%.log
-    dirname: 'logs/myapp',  // 日志目录（相对 cwd）
-    level: 'debug',         // 日志级别：error | warn | info | debug
-    console: true,          // 是否输出控制台
-    file: true,             // 是否输出文件
-    datePattern: 'YYYY-MM-DD', // 日志文件名日期格式
-    maxSize: '20m',         // 单文件大小上限，超过滚动
-    maxFiles: '30d',        // 日志保留时长，如 '30d' 或份数 14
-    format: printf(({ timestamp, level, message }) =>
-        `[${timestamp}] [${level.toUpperCase()}] ${message}`), // 自定义格式
-    split: true,            // 按 debug/info/warn/error 分文件，或传数组如 ['info','warn','error']
-    envDir: true            // 可选：启用环境变量目录，最终目录 = process.env.LOG_DIR + dirname
-});
-
-myLogger.info('hello');
-myLogger.error(new Error('oops'));
+hooks.registerLoader = async (db, logger) => { /* 读任务列表并 scheduler.create */ }
+hooks.registerComplete = async (db, { id, result }) => { /* 任务成功回写 */ }
+hooks.registerError = async (db, { id, error }) => { /* 任务失败回写 */ }
 ```
 
-> `envDir` 使用说明：
-> - `envDir: true` 时，最终日志目录 = `process.env.LOG_DIR` 拼接 `dirname`（此时 `dirname` 仅作子目录名），例如 `LOG_DIR=/var/log/app` + `dirname: 'jobs'` → `/var/log/app/jobs`
-> - `LOG_DIR` 未设置时回退到 `dirname` 本身（相对 cwd）
-> - 不启用 `envDir` 时保持原逻辑：`dirname` 直接作为日志目录（相对 cwd 或绝对路径）
+- 不赋值时使用默认空实现（不会崩溃，只提示一次）。
+- 回写参数：`id` 为 `bree.add()` 时写入的 `workerData.id`（在 `registerLoader` 里通过 `workerData: { id: 业务主键 }` 自定义），`result` 为 worker 返回的数据，`error` 为异常堆栈。
+- **注意**：worker 线程内存独立，主进程的 hooks 单例在 worker 里不可见，因此回写一律发生在主进程（成功走 `postMessage`，失败走 `errorHandler`），业务函数里无需也不应注入回写钩子。
 
-- `split: false`（默认）：全部级别写入 `<name>-%DATE%.log`
-- `split: true`：按 `debug/info/warn/error` 各写一个文件（`<name>-<level>-%DATE%.log`）
-- `split: ['info', 'warn', 'error']`：只按指定级别拆分
+### scheduler —— 调度器（主进程）
 
-### 获取日志文件完整路径
+| 方法 | 说明 |
+| --- | --- |
+| `register()` | 初始化数据库 + Bree 实例，并调用 `hooks.registerLoader` 加载任务列表 |
+| `create(job)` | 注册任务（同名已存在则跳过）。`job` 为 Bree job 配置，如 `{ name, interval, workerData }` |
+| `reset(job, startStatus?)` | 停止并替换同名任务，可选是否立即启动 |
+| `remove(name)` | 停止并移除任务 |
+| `start(name)` | 启动（后台周期性运行） |
+| `stop(name)` | 停止（向 worker 发送 cancel 消息，触发优雅取消） |
+| `run(name)` | 立即执行一次 |
+| `getBree()` | 获取底层 Bree 实例 |
 
-创建的 logger 附带 `getFilePaths()` / `getFilePath(level)` 方法（返回当前正在写入的文件）：
+任务文件按 `name` 对应 `jobs/<name>.js`。定时支持 Bree 的 `interval` 语法（如 `'5 minutes'`）或 cron 表达式（`hasSeconds` 已开启）。
+
+### useHandler —— 任务执行（worker 内）
 
 ```js
-// 所有日志文件（split 时含级别）
-logger.getFilePaths();
-// -> [{ level: 'debug', path: '/var/log/app/jobs/app-debug-2026-08-24.log' }, ...]
+import { useHandler } from '@layoutkit/bree-core'
 
-// 指定级别（未拆分时忽略 level 返回唯一文件）
-logger.getFilePath('error');
-// -> '/var/log/app/jobs/app-error-2026-08-24.log'
+const { run, getIsCancelled } = useHandler()
 
-// 不传参数返回第一个文件
-logger.getFilePath();
+const myJob = async ({ logger, redis, db }) => { /* 业务逻辑 */ }
+run(myJob)
 ```
+
+- 业务函数接收 `{ logger, redis, db }`：日志、Redis 单例、knex 数据库实例均已初始化。
+- **成功**：`run` 自动执行 `postMessage({ type: 'done', data: result })`，主进程调用 `hooks.registerComplete`。业务函数直接 `return` 结果即可，无需手动回写。
+- **失败**：worker 抛错由 bree `errorHandler` 捕获，主进程调用 `hooks.registerError`。
+- **取消**：主进程 `scheduler.stop(name)` 会向 worker 发送 `cancel` 消息，`useHandler` 内部设置取消标志；业务函数内用 `getIsCancelled()` 检查并提前退出。
 
 ## Express 服务
 
-通过 `useServer` 快速创建完整的 Express 服务：
-
 ```js
-import { useServer } from '@layoutkit/bree-core';
+import { useServer, route } from '@layoutkit/bree-core'
 
-const { app, start, stop } = useServer({
+const { app } = useServer({
     port: 3000,
-    logger: createLogger({ name: 'api', split: true }),
-    cors: true,                         // true | origin 字符串 | { origin, methods, headers }
-    staticDir: 'public',                // 静态资源目录（可传数组）
-    auth: false,                        // false 不启用 | true 内置 auth（需配 API_SECRET_KEY/API_TOKEN/ALLOW_IPS）
-                                        // | 自定义中间件函数或函数数组
-    health: true,                       // GET /health 健康检查
-    routes: (app) => {                  // 方式一：函数注册
-        app.get('/hello', (req, res) => res.success({ msg: 'hi' }));
-    }
-});
+    auth: true,                 // true=内置认证；也可传自定义中间件函数/数组；false=关闭
+    routesDir: ['routes'],      // 自动扫描路由目录，默认 ['routes', 'src/routes']
+})
 
-await start();
+await app.start()
 ```
 
-路由也可用配置数组方式（express 5 的 async handler 抛错会自动进入全局错误处理）：
+### 路由 —— 单函数接口风格（定义即自动注册）
 
 ```js
-const { app, start } = useServer({
-    port: 3000,
-    routes: [
-        { method: 'get', path: '/hello', handler: (req, res) => res.success({ msg: 'hi' }) },
-        { method: 'post', path: '/users', handler: [checkToken, async (req, res) => {
-            // async 抛错会被全局错误处理捕获
-        }] }
-    ]
-});
+import { route } from '@layoutkit/bree-core'
 
-await start();
+// handler 签名：async (body, req, res) => result
+// body = { ...params, ...query, ...body }，解构即用
+route.post('/test', ({ name }) => {
+    return { code: 0, message: 'success', data: { name } }  // 完整响应体原样返回
+})
+
+route.get('/user/:id', async ({ id }) => ({ id }))          // 普通数据自动 res.success 包装
+
+// 分组前缀
+const api = route.parentRoute('/task')
+api.get('/list', async () => [])                            // GET /task/list
+
+// 支持中间件（如 multer 上传）
+route.post('/upload', upload.single('file'), async (body, req) => {
+    return { code: 0, message: '上传成功', data: { filename: req.file.filename } }
+})
 ```
 
-**认证支持外部自定义中间件**（不依赖内置 auth 的环境变量）：
+- 方法：`route.get / route.post / route.put / route.delete / route.patch`，裸 `route(path, ...)` 默认 POST。
+- 中间件：单个函数或函数数组，放在 handler 之前。
+- 返回含 `code` 的对象原样输出，其余自动包装为 `res.success`；抛错进入全局错误处理。
+
+### useServer 选项
+
+| 选项 | 默认 | 说明 |
+| --- | --- | --- |
+| `port` | `3000` | 监听端口 |
+| `host` | `0.0.0.0` | 监听地址 |
+| `logger` | `createLogger({ name:'server', split:true })` | 自定义 logger |
+| `jsonLimit` / `urlencodedLimit` | `10mb` | body 大小限制 |
+| `cors` | `true` | 跨域；可传 `origin` 字符串或 `{ origin, methods, headers }` |
+| `staticDir` | `null` | 静态资源目录（可传数组） |
+| `auth` | `false` | `true`=内置认证 / 函数或数组=自定义中间件 |
+| `health` | `true` | 启用 `GET /health` |
+| `trustProxy` | `true` | 信任代理（影响 `req.ip`） |
+| `routes` | `null` | 函数 `(app) => {}` 或路由配置数组 |
+| `routesDir` | `['routes','src/routes']` | 路由文件目录，`start()` 时递归扫描自动加载；`false` 关闭 |
+
+内置能力：请求日志（含耗时/状态码/IP）、CORS、`res.success(data, message)` / `res.fail(message, code)` 统一响应、404 与全局错误处理、健康检查。
+
+### 内置认证 auth
 
 ```js
-// 自定义校验中间件
-const checkToken = (req, res, next) => {
-    const token = req.headers['x-api-key'];
-    if (token !== 'secret') return res.fail('Unauthorized', 401);
-    next();
-};
-
-const { start } = useServer({
-    port: 3000,
-    auth: checkToken,        // 传函数；也支持函数数组 [checkToken, checkIp]
-    routes: (app) => { app.get('/api', (req, res) => res.success()); }
-});
-
-await start();
+useServer({ auth: true })
 ```
 
-### 单函数接口风格（`route`）
+- 从 `req.headers[API_SECRET_KEY_NAME]` 取密钥，值需为 **AES 密文**（用 `API_SECRET_KEY` 解密后等于 `API_TOKEN` 才通过）；
+- 校验请求 IP 是否在 `ALLOW_IPS` 白名单内；
+- 失败统一返回 HTTP 200 + `{ code: -1, message }`。
 
-JS 不支持 `@Route` 装饰器语法（装饰器只能用于 class），用 `route(path, handler)` 函数包装实现近似效果，定义即自动注册：
+## 日志 createLogger
 
 ```js
-// ===== routes/user.js（业务模块）=====
-import { route } from '@layoutkit/bree-core';
+import { createLogger } from '@layoutkit/bree-core'
 
-// 定义即自动注册，无需导出、无需传入 useServer
-route.post('/test', (body) => {
-    const { name, age } = body;   // body 自动合并 params/query/body
-    return { code: 0, message: 'success', data: null };  // 完整响应体原样返回
-});
+const logger = createLogger({
+    name: 'weixinapi',       // 文件名前缀 + 默认子目录名
+    level: 'info',           // error | warn | info | debug（默认 info，debug 会被过滤）
+    split: true,             // 按 debug/info/warn/error 拆四个文件；可传数组如 ['info','error']
+    // maxSize: '10m', maxFiles: '10d', dirname: '...', console: false, file: true
+})
 
-route.get('/user/:id', async ({ id }) => ({ id }));
+logger.error('...')  // 输出到 stderr
+logger.info('...')   // 输出到 stdout
 ```
+
+- 文件：`logs/<dirname ?? name>/<name>-%DATE%.log`（按天滚动）；设置 `LOG_DIR` 后根目录变为 `<LOG_DIR>/logs`。
+- 默认级别 `info`，想看到 `debug` 需显式 `level: 'debug'`。
+- 默认 `maxSize: '10m'`、`maxFiles: '10d'`。
+
+## 工具模块
+
+### redis
 
 ```js
-// ===== app.js（入口，只负责启动）=====
-import { useServer } from '@layoutkit/bree-core';
+import { redis } from '@layoutkit/bree-core'
 
-const { start } = useServer({ port: 3000 });  // 启动时自动扫描 routes 目录加载路由文件
-await start();
+await redis.set('key', { a: 1 }, 3600)   // 对象自动 JSON 序列化，可选过期秒
+const v = await redis.get('key')          // 自动尝试 JSON.parse
+await redis.del('key')
+await redis.hSet('hash', 'field', { x: 1 })
+await redis.lPush('list', item)           // 列表元素 JSON 序列化
+await redis.close()                       // 关闭连接
 ```
 
-业务路由文件放在项目根目录 `routes/` 下即可（可嵌套子目录），**无需手动 import**，`useServer` 启动时自动递归扫描加载。
+方法：`set` / `get` / `del` / `exists` / `expire` / `ttl` / `incr` / `decr` / `hSet` / `hGet` / `hGetAll` / `lPush` / `rPush` / `lPop` / `rPop` / `close`。
 
-**规则：**
+### database（knex + mssql）
 
-- **定义即自动注册**：`route(...)` 调用时自动收集，`useServer` 启动时自动加载（同 method+path 重复定义覆盖旧路由）
-- **自动扫描**：默认扫描 `routes` 目录（相对 cwd）下所有 `.js/.mjs/.cjs` 文件；可用 `routesDir` 自定义目录（传数组可扫多个，传 `false` 关闭扫描），如 `useServer({ routesDir: 'src/routes' })`
-- 默认 `POST`；方法类型便捷写法：`route.get(path, handler)`、`route.post(path, handler)`、`route.put`、`route.delete`、`route.patch`
-- 也可 `route(path, handler, method)` 指定方法
-- 返回带 `code` 字段的对象 → 原样 `res.json` 输出（自定义完整响应体）
-- 返回普通数据 → 自动包装为 `res.success(result)`
-- 抛错自动进入全局错误处理
-- 自动注册的路由与手动传入的 `routes` 混用，全局按静态路径优先排序
+```js
+import { database } from '@layoutkit/bree-core'
 
-**内置能力：**
+const db = await database.init()                    // 默认读 DB_CONNECTION_STRING
+const db2 = await database.init('user=..;password=..;server=..;database=..')  // 可传参覆盖
+const rows = await database.get()('users').select('*')
+await database.close()
+```
 
-- 统一响应格式：`res.success(data, message)` → `{ code: 0, message, data }`；`res.fail(message, code)` → `{ code, message, data: null }`
-- 请求日志：自动记录 `method url statusCode 耗时ms ip`
-- 全局错误处理：express 5 自动捕获 async 异常，统一 JSON 返回；404 统一 `{ code: 404, message: 'Not Found' }`
-- body 解析：JSON / urlencoded，默认上限 `10mb`（`jsonLimit`/`urlencodedLimit` 可调）
-- CORS 中间件内置实现，不依赖额外包
-- 静态资源、认证、健康检查均为可选开关
-- `stop()` 优雅关闭服务
+- 连接串支持 `key=value;key=value` 格式；配置 `DB_AES_KEY` 时自动尝试 AES 解密（明文则原样使用）。
+- `init()` 会先释放旧连接并 `SELECT 1` 验证真实连通。
+
+### aes（AES/ECB/PKCS7，兼容 Java）
+
+```js
+import { aes } from '@layoutkit/bree-core'
+
+const cipher = aes.encrypt('明文', '16字节密钥')     // 返回 Buffer
+const plain  = aes.decrypt(cipher, '16字节密钥')      // 返回 Buffer
+const str    = aes.decryptString('Base64密文', '16字节密钥')  // 密文字符串 → 明文
+```
+
+### excel
+
+```js
+import { excel } from '@layoutkit/bree-core'
+
+// 统一入口：file(落盘) | buffer(邮件用) | stream(10w+ 大数据流式)
+const filePath = await excel.exportExcel({
+    mode: 'file',
+    columns: [{ header: 'ID', key: 'id', width: 10 }],
+    data: [{ id: 1 }],
+    fileName: 'report',
+})
+
+excel.setFolder('exports')   // 可选：文件输出目录（相对 cwd）
+```
+
+### mail
+
+```js
+import { mail } from '@layoutkit/bree-core'
+
+await mail.init()   // 读取 MAIL_* 环境变量
+await mail.send(
+    '主题',
+    'a@x.com,b@x.com',      // 收件人（逗号分隔）
+    'cc@x.com',             // 抄送（可选）
+    '正文',
+    ['/path/to/file.xlsx']  // 附件（可选，自动截取文件名）
+)
+```
+
+## API 导出总览
+
+| 导出 | 说明 |
+| --- | --- |
+| `scheduler` | 调度器（主进程） |
+| `hooks` | 状态回写钩子（主进程共享对象） |
+| `useHandler` | 任务执行器（worker 内） |
+| `useServer` | Express 服务封装 |
+| `route` | 单函数风格路由 |
+| `auth` | 内置认证中间件 |
+| `createLogger` | 日志工厂 |
+| `database` | knex/mssql 数据库单例 |
+| `redis` | Redis 单例 |
+| `aes` | AES 加解密工具 |
+| `excel` | Excel 导出工具 |
+| `mail` | 邮件发送工具 |

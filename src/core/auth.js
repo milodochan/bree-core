@@ -1,8 +1,7 @@
 import aes from "../utils/aesUtil.js"
 
 export function auth(req, res, next) {
-    const apiKey = req.headers['x-api-key']
-
+    const apiKey = req.headers[process.env.API_SECRET_KEY_NAME]
     if (!apiKey) {
         return res.status(200).json({
             code: -1,

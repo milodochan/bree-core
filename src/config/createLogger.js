@@ -28,8 +28,9 @@ const defaultSplitLevels = ['debug', 'info', 'warn', 'error']
 /**
  * 统一 logger 工厂
  * @param {object} options
- * @param {string} [options.name='app']        日志文件名前缀，如 'worker' -> worker-%DATE%.log
- * @param {string} [options.dirname='logs']    日志输出目录（相对 cwd）
+ * @param {string} [options.name='app']        日志文件名前缀，如 'worker' -> worker-%DATE%.log；不传 dirname 时同时作为子目录名
+ * @param {string} [options.dirname]           日志子目录（相对 logs 根）；不传则用 name 作为子目录名，
+ *                                             显式传 '' 则直接写在 logs 根下。如 'weixinapi' -> logs/weixinapi/
  * @param {string} [options.level='info']      日志级别：error | warn | info | debug
  * @param {function} [options.format]          自定义日志格式（printf 函数），默认 [时间] [级别] 消息
  * @param {boolean} [options.console=true]     是否输出到控制台
@@ -46,31 +47,22 @@ const defaultSplitLevels = ['debug', 'info', 'warn', 'error']
 export function createLogger(options = {}) {
     const {
         name = 'app',
-        dirname = 'logs',
+        dirname,
         level = 'info',
         format = defaultLogFormat,
         console = true,
         file = true,
         datePattern = 'YYYY-MM-DD',
-        maxSize = '20m',
-        maxFiles = '30d',
-        split = false,
-        envDir = false
+        maxSize = '10m',
+        maxFiles = '10d',
+        split = false
     } = options
 
-    // 目录解析：启用环境变量时以 process.env.LOG_DIR 为根目录拼接 dirname
-    let logDir = dirname
-    if (envDir) {
-        const envRoot = process.env.LOG_DIR
-        if (envRoot) {
-            logDir = path.join(envRoot, dirname)
-        } else {
-            console.warn(`[createLogger] 环境变量 LOG_DIR 未设置，回退到相对目录: ${dirname}`)
-        }
-    }
-
-    // 所有文件 transport，用于日志路径查询
-    const fileTransports = []
+    // 目录解析：设置 LOG_DIR 环境变量即自动以其为日志根目录，否则以 logs 为根目录
+    // dirname 为其下子目录；不传 dirname 时自动用 name 作为子目录；显式传 '' 则直接写根
+    const subDir = dirname ?? name
+    const root = process.env.LOG_DIR ? path.join(process.env.LOG_DIR, 'logs') : 'logs'
+    const logDir = path.join(root, subDir)
 
     /**
      * 内部：创建文件滚动 transport

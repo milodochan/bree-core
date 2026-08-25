@@ -1,7 +1,6 @@
 import Bree from 'bree'
 import path from 'node:path'
 import fs from 'node:fs'
-import { __dirname } from '../utils/path.js'
 import createLogger from '../config/createLogger.js'
 import database from '../utils/databaseUtil.js'
 import hooks from './hooks.js'
@@ -56,11 +55,12 @@ const createBree = () => {
         root: jobsPath,
         doRootCheck: false, // 任务列表由 hooks.registerLoader / 数据库提供，无需 root/index.js
         errorHandler: async (error, workerMetadata) => {
-            logger.info(`[${workerMetadata.name}] There was an error while running a worker ${workerMetadata.name} with thread ID: ${workerMetadata?.threadId}`)
-            logger.error(`[${workerMetadata?.name}] ${error?.stack || error?.message || error}`)
             if (error?.message?.indexOf('exited with code') > -1) return
-            const job = instance.config.jobs.find(x => x.name === workerMetadata?.name)
-            const workerData = job?.worker?.workerData
+            const name = workerMetadata?.name
+            logger.info(`[${name}] There was an error while running a worker ${name} with thread ID: ${workerMetadata?.threadId}`)
+            logger.error(`[${name}] ${error?.stack || error?.message || error}`)
+            const worker = instance.workers.get(name)
+            const workerData = worker?.workerData
             if (workerData) {
                 await hooks.registerError(db, { id: workerData.id, error: error?.stack })
             }
@@ -68,13 +68,30 @@ const createBree = () => {
     })
 
     instance.on('worker created', (name) => {
-        console.log('worker created', name)
-        logger.info(name, 'worker created')
+        console.log(`[${name}] worker created`)
+        logger.info(`[${name}] worker created`)
     })
 
-    instance.on('worker deleted', (name) => {
-        console.log('worker deleted', name)
-        logger.info(name, 'worker deleted')
+    instance.on('worker deleted', async (name) => {
+        console.log(`[${name}] worker deleted`)
+        logger.info(`[${name}] worker deleted`)
+    })
+
+    instance.on('worker message', async (name, message) => {
+        console.log(`[${name}] worker message:`, message)
+
+        if (message.type === 'done') {
+            try {
+                const worker = instance.workers.get(name)
+                const workerData = worker?.workerData
+                await hooks.registerComplete(db, {
+                    id: workerData?.id,
+                    result: message.data
+                })
+            } catch (error) {
+                logger.error(`[${name}] registerComplete failed`, error)
+            }
+        }
     })
 
     return instance
@@ -111,10 +128,10 @@ const stop = async (name) => await bree.stop(name)
 // 执行一次任务
 const run = async (name) => await bree.run(name)
 // 任务初始化
-const register = async (callback) => {
+const register = async () => {
     db = await database.init()
     bree = createBree()
-    await callback(db)
+    await hooks.registerLoader(db, logger)
 }
 
 export default {

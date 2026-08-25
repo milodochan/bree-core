@@ -1,17 +1,31 @@
-/**
- * 公用钩子注册表（单一存储，跨模块共享）
- *
- * 在应用入口（如 app.js）中赋值配置，useHandler / scheduler 等模块自动生效。
- * 后续新增钩子只需在此扩展字段。
- *
- * - registerError(db, obj)     任务失败回写（useHandler / scheduler 使用），obj: { id, ResultStatus: 1, ErrorMessage }
- * - registerComplete(db, obj)  任务成功回写（useHandler 使用），obj: { id, ResultStatus: 0, ExecuteResult }
- * - registerLoader(db, obj)    任务列表加载（scheduler 使用），返回值作为任务列表
- * - registerCreate(db, obj)    任务创建状态回写（scheduler 使用），obj: { id }
- */
-export const hooks = {
-    registerError: null,
-    registerComplete: null
+
+let registerError = null
+let registerComplete = null
+let registerLoader = null
+
+/** 每个钩子未注册时只提示一次，避免刷屏 */
+const warnOnce = (() => {
+    const warned = new Set()
+    return (name) => {
+        if (warned.has(name)) return
+        warned.add(name)
+        console.warn(
+            `[bree-core] hooks.${name} 未注册，任务状态不会回写数据库。` +
+            `可直接赋值 hooks.${name} = async (db, obj) => { /* 回写逻辑 */ } 注册。`
+        )
+    }
+})()
+
+// 默认空实现：不注册不崩溃，只提示一次
+registerError = async () => warnOnce('registerError')
+registerComplete = async () => warnOnce('registerComplete')
+registerLoader = async () => {
+    warnOnce('registerLoader')
+    return []
 }
 
-export default hooks
+export default {
+    registerLoader,
+    registerError,
+    registerComplete
+}
