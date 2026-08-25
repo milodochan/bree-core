@@ -1,7 +1,15 @@
 import aes from "../utils/aesUtil.js"
 
+const getClientIp = (req) => {
+    return req.headers['x-forwarded-for']?.split(',')[0]?.trim()
+        || req.headers['x-real-ip']
+        || req.ip
+        || req.connection.remoteAddress
+}
+
 export function auth(req, res, next) {
-    const apiKey = req.headers[process.env.API_SECRET_KEY_NAME]
+    const headerName = process.env.API_SECRET_KEY_NAME.toLowerCase()
+    const apiKey = req.headers[headerName]
     if (!apiKey) {
         return res.status(200).json({
             code: -1,
@@ -17,12 +25,7 @@ export function auth(req, res, next) {
         })
     }
 
-    let ip = req.ip
-    console.log('Request IP:', ip)
-    if (ip.startsWith('::ffff:')) {
-        ip = ip.substring(7)
-    }
-
+    const ip = getClientIp(req)
     const allowIps = process.env.ALLOW_IPS?.split(',') || []
     if (!allowIps.includes(ip)) {
         return res.status(200)
