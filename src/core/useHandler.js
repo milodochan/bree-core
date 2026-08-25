@@ -1,4 +1,4 @@
-import { parentPort } from 'node:worker_threads'
+import { parentPort, workerData } from 'node:worker_threads'
 import createLogger from '../config/createLogger.js'
 import redis from '../utils/redisUtil.js'
 import database from '../utils/databaseUtil.js'
@@ -20,7 +20,8 @@ export function useHandler() {
     const getIsCancelled = () => isCancelled
     const run = async (worker) => {
         db = await database.init()
-        const result = await worker({ logger, redis, db })
+        const requestData = workerData?.requestData
+        const result = await worker({ logger, redis, db, requestData })
         if (parentPort) {
             parentPort.postMessage({
                 type: 'done',
