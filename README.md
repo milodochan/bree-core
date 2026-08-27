@@ -43,7 +43,9 @@ hooks.registerLoader = async (db, logger) => {
         await scheduler.create({
             name: job.Name,                 // 对应 jobs/<Name>.js
             interval: job.Interval,         // 如 '5 minutes' / '*/10 * * * * *'
-            workerData: { id: job.ID },     // 回写时用业务主键 ID
+            worker: {
+                workerData: { id: job.ID }, // 回写时用业务主键 ID（bree 9.x 需放在 worker.workerData）
+            },
         })
     }
 }
@@ -124,15 +126,20 @@ scheduler.register()
       └─ scheduler.create(job)            │ useHandler().run(业务)  │
 scheduler.start('test') / run('test') ──▶ │   ├─ worker({logger,    │
       │                                  │   │      redis, db})    │
-      ▼                                  │   └─ postMessage(done)  │
-worker created ─────────────────────────▶└─────────────────────────┘
-      │
-worker message { type:'done', data }
-  └─ hooks.registerComplete(db, { id, result })
+      ▼                                  │   ├─ postMessage(        │
+worker created ─────────────────────────▶│   │   {type:'data',data})│
+      │                                  │   └─ postMessage('done') │
+      ▼                                  └─────────────────────────┘
+bree 9.x workerMessageHandler
+  ├─ 收到 { type:'data', data } → 暂存结果
+  └─ 收到 'done'（bree 自动 terminate worker）
+       └─ hooks.registerComplete(db, { id, result })
 
 worker 抛错 ──▶ bree errorHandler
   └─ hooks.registerError(db, { id, error })
 ```
+
+> 说明：bree 9.x 已移除 `'worker message'` 事件，改为通过构造参数 `workerMessageHandler` 接收 worker 消息。worker 发字符串 `'done'` 时 bree 会自动清理 worker（terminate + `worker deleted`）。因此 `useHandler` 采用"先发数据对象、再发 `'done'`"的两段式消息。
 
 ### hooks —— 状态回写钩子
 
@@ -145,21 +152,33 @@ hooks.registerError = async (db, { id, error }) => { /* 任务失败回写 */ }
 ```
 
 - 不赋值时使用默认空实现（不会崩溃，只提示一次）。
-- 回写参数：`id` 为 `bree.add()` 时写入的 `workerData.id`（在 `registerLoader` 里通过 `workerData: { id: 业务主键 }` 自定义），`result` 为 worker 返回的数据，`error` 为异常堆栈。
+- 回写参数：`id` 为 `bree.add()` 时写入的 `worker.workerData.id`（在 `registerLoader` 里通过 `worker: { workerData: { id: 业务主键 } }` 自定义），`result` 为 worker 返回的数据，`error` 为异常堆栈。
 - **注意**：worker 线程内存独立，主进程的 hooks 单例在 worker 里不可见，因此回写一律发生在主进程（成功走 `postMessage`，失败走 `errorHandler`），业务函数里无需也不应注入回写钩子。
 
 ### scheduler —— 调度器（主进程）
 
-| 方法 | 说明 |
-| --- | --- |
-| `register()` | 初始化数据库 + Bree 实例，并调用 `hooks.registerLoader` 加载任务列表 |
-| `create(job)` | 注册任务（同名已存在则跳过）。`job` 为 Bree job 配置，如 `{ name, interval, workerData }` |
-| `reset(job, startStatus?)` | 停止并替换同名任务，可选是否立即启动 |
-| `remove(name)` | 停止并移除任务 |
-| `start(name)` | 启动（后台周期性运行） |
-| `stop(name)` | 停止（向 worker 发送 cancel 消息，触发优雅取消） |
-| `run(name)` | 立即执行一次 |
-| `getBree()` | 获取底层 Bree 实例 |
+所有方法均返回统一结果结构（与 route 封装的 `{ code, message, data }` 约定一致）：
+
+```js
+{ code: 0, message: '...', data }    // 成功
+{ code: -1, message: '...' }         // 失败
+```
+
+| 方法 | 说明 | 失败场景 |
+| --- | --- | --- |
+| `register()` | 初始化数据库 + Bree 实例，并调用 `hooks.registerLoader` 加载任务列表 | 数据库/任务目录异常 |
+| `create(job)` | 注册任务，返回 `{ code: 0, data: { name } }`。`job` 为 Bree job 配置，如 `{ name, interval, worker: { workerData: { id } } }` | 缺 `name`、同名已存在 |
+| `reset(job, startStatus?)` | 停止并替换同名任务，可选是否立即启动 | 任务不存在 |
+| `remove(name)` | 停止并移除任务 | 任务不存在 |
+| `start(name)` | 启动（后台周期性运行） | 任务不存在 |
+| `stop(name)` | 停止（向 worker 发送 cancel 消息，触发优雅取消） | 任务不存在 |
+| `run(name)` | 立即执行一次 | 任务不存在 |
+| `getBree()` | 获取底层 Bree 实例 | — |
+
+```js
+const result = await scheduler.run('test')
+// { code: 0, message: 'job "test" 已触发执行', data: { name: 'test' } }
+```
 
 任务文件按 `name` 对应 `jobs/<name>.js`。定时支持 Bree 的 `interval` 语法（如 `'5 minutes'`）或 cron 表达式（`hasSeconds` 已开启）。
 
@@ -175,7 +194,7 @@ run(myJob)
 ```
 
 - 业务函数接收 `{ logger, redis, db }`：日志、Redis 单例、knex 数据库实例均已初始化。
-- **成功**：`run` 自动执行 `postMessage({ type: 'done', data: result })`，主进程调用 `hooks.registerComplete`。业务函数直接 `return` 结果即可，无需手动回写。
+- **成功**：`run` 自动执行 `postMessage({ type: 'data', data: result })` + `postMessage('done')`，主进程 `workerMessageHandler` 收到后调用 `hooks.registerComplete`。业务函数直接 `return` 结果即可，无需手动回写。
 - **失败**：worker 抛错由 bree `errorHandler` 捕获，主进程调用 `hooks.registerError`。
 - **取消**：主进程 `scheduler.stop(name)` 会向 worker 发送 `cancel` 消息，`useHandler` 内部设置取消标志；业务函数内用 `getIsCancelled()` 检查并提前退出。
 

@@ -1,11 +1,10 @@
 import { parentPort, workerData } from 'node:worker_threads'
 import createLogger from '../config/createLogger.js'
 import redis from '../utils/redisUtil.js'
-import database from '../utils/databaseUtil.js'
+import { useDatabase } from '../utils/databaseUtil.js'
 
 export function useHandler() {
     let isCancelled = false
-    let db = null
     const logger = createLogger({ name: 'worker' })
 
     if (parentPort)
@@ -19,16 +18,31 @@ export function useHandler() {
 
     const getIsCancelled = () => isCancelled
     const run = async (worker) => {
-        db = await database.init()
-        const requestData = workerData?.requestData
-        const result = await worker({ logger, redis, db, requestData })
-        if (parentPort) {
-            parentPort.postMessage({
-                type: 'done',
-                data: result
-            })
+        if (typeof worker !== 'function') {
+            logger.error(`run worker is not a function`)
+            return
         }
-        else process.exit(0)
+
+        let close = null
+        try {
+            const database = await useDatabase()
+            const db = database.db
+            close = database.close
+            const result = await worker({ logger, redis, db, workerData })
+            if (parentPort) parentPort.postMessage({ type: 'complete', data: result })
+        }
+        catch (error) {
+            logger.error(`worker=>${error?.stack || error?.message || error}`)
+        }
+        finally {
+            try {
+                await close?.()
+            } catch (error) {
+                logger.error(`database close=>${error?.stack || error?.message || error}`)
+            }
+            if (parentPort) parentPort.postMessage('done')
+            else process.exit(0)
+        }
     }
 
     return { run, getIsCancelled }

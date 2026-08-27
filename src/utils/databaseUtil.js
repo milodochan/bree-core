@@ -1,9 +1,7 @@
 import knex from 'knex'
 import aes from './aesUtil.js'
 
-let db = null
-
-/** 解析 `key=value;key=value` 形式的连接串（值允许包含 `=`） */
+/** 解析 key=value;key=value 形式的连接串 */
 const parseConnectionString = (str) =>
     str.split(';').reduce((acc, param) => {
         const idx = param.indexOf('=')
@@ -14,75 +12,46 @@ const parseConnectionString = (str) =>
         return acc
     }, {})
 
-/** 配置了 DB_AES_KEY 时尝试解密；非密文（解密失败）则原样使用 */
+/** 配置了 DB_AES_KEY 时尝试解密 */
 const resolveConnectionString = (connectionString) => {
     const aesKey = process.env.DB_AES_KEY
     if (aesKey) {
         try {
             return aes.decryptString(connectionString, aesKey)
         } catch {
-            // 明文连接串，直接使用
+            // 解密失败，认为是明文
         }
     }
+
     return connectionString
 }
+/**
+ * 创建数据库实例
+ */
+export const useDatabase = async (connectionString = process.env.DB_CONNECTION_STRING) => {
+    if (!connectionString)
+        throw new Error('DB connection string required: pass it to init(str) or set DB_CONNECTION_STRING')
 
-class DatabaseHelper {
-    /**
-     * 初始化数据库连接（自动读取 DB_CONNECTION_STRING，可传参覆盖）
-     * @param {string} [connectionString=process.env.DB_CONNECTION_STRING] 连接串（明文或 AES 密文）
-     * @returns {Promise<object>} knex 实例
-     * @example
-     * const db = await database.init()
-     * const rows = await db('users').select('*')
-     */
-    async init(connectionString = process.env.DB_CONNECTION_STRING) {
-        if (!connectionString) {
-            throw new Error(
-                'DB connection string required: pass it to database.init(str) or set DB_CONNECTION_STRING'
-            )
-        }
-        await this.close() // 重复初始化前先释放旧连接
-
-        const params = parseConnectionString(resolveConnectionString(connectionString))
-        db = knex({
-            client: 'mssql',
-            connection: {
-                user: params.user,
-                password: params.password,
-                server: params.server,
-                database: params.database,
-                options: {
-                    encrypt: false
-                }
+    // 当前实例重复初始化
+    const params = parseConnectionString(resolveConnectionString(connectionString))
+    const db = knex({
+        client: 'mssql',
+        connection: {
+            user: params.user,
+            password: params.password,
+            server: params.server,
+            database: params.database,
+            options: {
+                encrypt: false
             }
-        })
-
-        try {
-            await db.raw('SELECT 1') // 验证真实连接
-        } catch (err) {
-            await this.close()
-            throw err
         }
-        return db
-    }
+    })
 
-    /**
-     * 获取 knex 实例（未初始化时给出明确提示）
-     * @returns {object} knex 实例
-     */
-    get() {
-        if (!db) throw new Error('Database not initialized, call await database.init() first')
-        return db
-    }
+    await db.raw('SELECT 1')
+    const close = async () => await db.destroy()
 
-    /** 关闭数据库连接 */
-    async close() {
-        if (db) {
-            await db.destroy()
-            db = null
-        }
+    return {
+        db,
+        close
     }
 }
-
-export default new DatabaseHelper()

@@ -2,11 +2,10 @@ import Bree from 'bree'
 import path from 'node:path'
 import fs from 'node:fs'
 import createLogger from '../config/createLogger.js'
-import database from '../utils/databaseUtil.js'
+import { useDatabase } from '../utils/databaseUtil.js'
 import hooks from './hooks.js'
 
 let bree = null
-let db = null
 let jobsRoot = null
 
 const logger = createLogger({ name: 'scheduler', split: true })
@@ -50,19 +49,80 @@ const createBree = () => {
         console.warn(`⚠️  Jobs directory not found: ${jobsPath}`)
         console.warn(`   Please create it or set BREE_JOBS_PATH environment variable`)
     }
+    const getWorkerData = (name) => instance.config.jobs.find(a => a.name === name)?.worker?.workerData
     const instance = new Bree({
         hasSeconds: true,
         root: jobsPath,
         doRootCheck: false, // 任务列表由 hooks.registerLoader / 数据库提供，无需 root/index.js
-        errorHandler: async (error, workerMetadata) => {
-            if (error?.message?.indexOf('exited with code') > -1) return
+        // bree 9.x 官方消息回调（替代已移除的 'worker message' 事件）：
+        // worker 发来的所有消息都进这里；发字符串 'done' 时 bree 会自动清理 worker（terminate + worker deleted）
+        workerMessageHandler: async (workerMetadata) => {
             const name = workerMetadata?.name
-            logger.info(`[${name}] There was an error while running a worker ${name} with thread ID: ${workerMetadata?.threadId}`)
-            logger.error(`[${name}] ${error?.stack || error?.message || error}`)
-            const worker = instance.workers.get(name)
-            const workerData = worker?.workerData
-            if (workerData) {
-                await hooks.registerError(db, { id: workerData.id, error: error?.stack })
+            const message = workerMetadata?.message
+            let close = null
+            try {
+                console.log(`[${name}] worker message:`, message)
+                if (message?.type !== 'complete') return
+
+                const workerData = getWorkerData(name)
+                if (!workerData) return
+                if (hooks.registerComplete === null || typeof hooks.registerComplete !== 'function') {
+                    logger.error('hooks.registerComplete is not a function')
+                    return
+                }
+
+                const database = await useDatabase()
+                const db = database.db
+                if (!db) {
+                    logger.error('Database initialization failed')
+                    return
+                }
+
+                close = database.close
+                const sendData = { ...workerData, result: JSON.stringify(message?.data ?? {}) }
+                await hooks.registerComplete(db, sendData)
+            }
+            catch (error) {
+                logger.error(`[${name}] ${error?.stack || error?.message || error}`)
+            }
+            finally {
+                await close?.()
+            }
+        },
+        errorHandler: async (error, workerMetadata) => {
+            const name = workerMetadata?.name
+            let close = null
+            try {
+                if (error?.message?.indexOf('exited with code') > -1) return
+                logger.error(`[${name}] ${error?.stack || error?.message || error}`)
+
+                const workerData = getWorkerData(name)
+                if (!workerData) return
+                if (hooks.registerError === null || typeof hooks.registerError !== 'function') {
+                    logger.error('hooks.registerError is not a function')
+                    return
+                }
+
+                const database = await useDatabase()
+                const db = database.db
+                if (!db) {
+                    logger.error('Database initialization failed')
+                    return
+                }
+
+                close = database.close
+                const sendData = {
+                    ...workerData,
+                    error: error?.stack ||
+                        error?.message
+                }
+                await hooks.registerError(db, sendData)
+            }
+            catch (error) {
+                logger.error(`[${name}] ${error?.stack || error?.message || error}`)
+            }
+            finally {
+                await close?.()
             }
         }
     })
@@ -77,61 +137,107 @@ const createBree = () => {
         logger.info(`[${name}] worker deleted`)
     })
 
-    instance.on('worker message', async (name, message) => {
-        console.log(`[${name}] worker message:`, message)
-
-        if (message.type === 'done') {
-            try {
-                const worker = instance.workers.get(name)
-                const workerData = worker?.workerData
-                await hooks.registerComplete(db, {
-                    id: workerData?.id,
-                    result: message.data
-                })
-            } catch (error) {
-                logger.error(`[${name}] registerComplete failed`, error)
-            }
-        }
-    })
-
     return instance
 }
 
-const getBree = () => bree
-const reset = async (job, startStatus) => {
-    await bree.stop(job.name)
-    const index = bree.config.jobs.findIndex(x => x.name === job.name)
-    if (index !== -1) bree.config.jobs.splice(index, 1)
-    await bree.add(job)
-    if (startStatus) await bree.start(job.name)
+// 统一返回结构：
+//   成功: { code: 0, message, data }
+//   失败: { code: -1, message }
+const ok = (message, data = undefined) => ({ code: 0, message, data })
+const fail = (message) => ({ code: -1, message })
+const notInit = () => (bree ? null : fail('scheduler 未初始化，请先调用 scheduler.register()'))
+const isExist = (name) => bree?.config?.jobs?.some(x => x.name === name)
+
+// 统一包装：未初始化检查 + 异常捕获，让每个方法只保留业务逻辑
+const guard = (fn) => async (...args) => {
+    const ni = notInit()
+    if (ni) return ni
+
+    try {
+        return await fn(...args)
+    }
+    catch (e) {
+        return fail(e?.message || String(e))
+    }
 }
 
-const remove = async (name) => {
+const getBree = () => bree
+
+// 创建任务（仅注册到调度器，不会自动执行）
+const create = guard(async (job) => {
+    const name = job?.name
+    if (!name) return fail('job 必须包含 name')
+    if (isExist(name)) return fail(`job "${name}" 已存在`)
+    await bree.add(job)
+    return ok(`job "${name}" 创建成功`, { name })
+})
+
+// 重置任务（移除后按新配置重新添加，可选立即启动）
+const reset = guard(async (job, startStatus) => {
+    const name = job?.name
+    if (!name) return fail('job 必须包含 name')
+    const removed = await remove(name)
+    if (removed.code !== 0) return removed
+    await bree.add(job)
+    if (startStatus) await bree.start(name)
+    return ok(`job "${name}" 已重置${startStatus ? '并启动' : ''}`, { name, startStatus })
+})
+
+// 移除任务（停止并删除）
+const remove = guard(async (name) => {
+    if (!isExist(name)) return fail(`job "${name}" 不存在`)
     await bree.stop(name)
-    // 删除运行中的 worker 貌似不需要
-    // delete bree.workers.get(name)
     const index = bree.config.jobs.findIndex(x => x.name === name)
     if (index !== -1) bree.config.jobs.splice(index, 1)
-}
-
-const create = async (job) => {
-    if (bree.config.jobs.some(x => x.name === job.name))
-        return
-
-    await bree.add(job)
-}
+    return ok(`job "${name}" 已移除`, { name })
+})
 
 // 启动任务
-const start = async (name) => await bree.start(name)
+const start = guard(async (name) => {
+    if (!isExist(name)) return fail(`job "${name}" 不存在`)
+    await bree.start(name)
+    return ok(`job "${name}" 已启动`, { name })
+})
+
 // 停止任务
-const stop = async (name) => await bree.stop(name)
-// 执行一次任务
-const run = async (name) => await bree.run(name)
-// 任务初始化
+const stop = guard(async (name) => {
+    if (!isExist(name)) return fail(`job "${name}" 不存在`)
+    await bree.stop(name)
+    return ok(`job "${name}" 已停止`, { name })
+})
+
+// 执行一次任务（不按周期调度，立即跑一次）
+const run = guard(async (name) => {
+    if (!isExist(name)) return fail(`job "${name}" 不存在`)
+    await bree.run(name)
+    return ok(`job "${name}" 已触发执行`, { name })
+})
+
+// 任务初始化：初始化数据库、创建 Bree 实例并加载任务列表
 const register = async () => {
-    db = await database.init()
-    bree = createBree()
-    await hooks.registerLoader(db, logger)
+    let close = null
+    try {
+        if (hooks.registerLoader === null || typeof hooks.registerLoader !== 'function')
+            throw new Error('hooks.registerLoader is not a function')
+
+        const database = await useDatabase()
+        const db = database.db
+        if (!db) throw new Error('Database initialization failed')
+
+        close = database.close
+        bree = createBree()
+        if (!bree) throw new Error('Breejs initialization failed')
+
+        await hooks.registerLoader(db, logger)
+        const jobs = bree.config.jobs.map(x => ({ name: x.name, interval: x.interval }))
+        return ok('scheduler 已注册', { jobs })
+    }
+    catch (error) {
+        logger.error(`register=>${error?.stack || error?.message || error}`)
+    }
+    finally {
+        await close?.()
+    }
 }
 
 export default {
