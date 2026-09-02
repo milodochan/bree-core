@@ -94,41 +94,49 @@ class RedisHelper {
     }
 
     async lPush(key, value) {
-        const redis = await getRedis()
+        if (value === null || value === undefined)
+            return null
 
-        return await redis.lPush(
-            key,
-            JSON.stringify(value)
-        )
+        value = typeof value === 'object' ? JSON.stringify(value) : String(value)
+        const redis = await getRedis()
+        return redis.lPush(key, value)
     }
 
     async rPush(key, value) {
-        const redis = await getRedis()
+        if (value === null || value === undefined)
+            return null
 
-        return await redis.rPush(
-            key,
-            JSON.stringify(value)
-        )
+        value = typeof value === 'object' ? JSON.stringify(value) : String(value)
+        const redis = await getRedis()
+        return redis.rPush(key, value)
     }
 
-    async rPop(key) {
+    async rPop(key, json = false) {
         const redis = await getRedis()
-
         const value = await redis.rPop(key)
-
+        if (!value) return null
+        if (json) {
+            try {
+                return JSON.parse(value)
+            } catch {
+                return value
+            }
+        }
         return value
-            ? JSON.parse(value)
-            : null
     }
 
-    async lPop(key) {
+    async lPop(key, json = false) {
         const redis = await getRedis()
-
         const value = await redis.lPop(key)
-
+        if (!value) return null
+        if (json) {
+            try {
+                return JSON.parse(value)
+            } catch {
+                return value
+            }
+        }
         return value
-            ? JSON.parse(value)
-            : null
     }
 
     async close() {

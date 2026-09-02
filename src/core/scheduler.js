@@ -176,8 +176,7 @@ const create = guard(async (job) => {
 const reset = guard(async (job, startStatus) => {
     const name = job?.name
     if (!name) return fail('job 必须包含 name')
-    const removed = await remove(name)
-    if (removed.code !== 0) return removed
+    await remove(name)
     await bree.add(job)
     if (startStatus) await bree.start(name)
     return ok(`job "${name}" 已重置${startStatus ? '并启动' : ''}`, { name, startStatus })
