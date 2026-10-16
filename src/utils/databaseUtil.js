@@ -47,7 +47,6 @@ export const useDatabase = async (connectionString = process.env.DB_CONNECTION_S
         }
     })
 
-    await db.raw('SELECT 1')
     const close = async () => await db.destroy()
 
     return {

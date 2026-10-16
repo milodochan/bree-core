@@ -1,6 +1,7 @@
 import winston from 'winston'
 import 'winston-daily-rotate-file'
 import path from 'node:path'
+import { parentPort, isMainThread } from 'node:worker_threads'
 
 const { combine, timestamp, printf } = winston.format
 
@@ -26,6 +27,44 @@ const levelFilter = (level) => {
 const defaultSplitLevels = ['debug', 'info', 'warn', 'error']
 
 /**
+ * worker 线程内的日志代理：不直接写文件，而是把日志 postMessage 给主线程，
+ * 由主线程按 name 分流到对应的独立文件（见 scheduler.workerLogHandler）。
+ *
+ * 这样在 worker 中调用 createLogger({ name: 'weixinapi' }) 也能落到 logs/weixinapi/ 独立文件，
+ * 而不会在每个 worker 里各自开一份文件句柄（多 worker 写同一文件 / 句柄泄漏）。
+ * 参数序列化与 workerLogger.js 保持一致：
+ *   - Error -> { message, stack }（保证能通过 postMessage 且主线程能还原成 stack）
+ *   - 不可结构化克隆的对象 -> String(arg)
+ *
+ * @param {string} name  logger 名，作为主线程分流 / 独立子目录的依据
+ */
+const createWorkerProxy = (name) => {
+    const proxy = {}
+    for (const level of ['debug', 'info', 'warn', 'error']) {
+        proxy[level] = (...args) => {
+            parentPort?.postMessage({
+                type: 'log',
+                name,
+                level,
+                args: args.map(arg => {
+                    if (arg instanceof Error) {
+                        return { message: arg.message, stack: arg.stack }
+                    }
+                    try {
+                        structuredClone(arg)
+                        return arg
+                    } catch {
+                        return String(arg)
+                    }
+                })
+            })
+        }
+    }
+    proxy.close = () => { }
+    return proxy
+}
+
+/**
  * 统一 logger 工厂
  * @param {object} options
  * @param {string} [options.name='app']        日志文件名前缀，如 'worker' -> worker-%DATE%.log；不传 dirname 时同时作为子目录名
@@ -45,8 +84,16 @@ const defaultSplitLevels = ['debug', 'info', 'warn', 'error']
  * @returns {import('winston').Logger}
  */
 export function createLogger(options = {}) {
+    const { name = 'app' } = options
+
+    // —— worker 线程：返回代理，由主线程按 name 分流到独立文件 ——
+    // 避免在多个 worker 中各开文件句柄；同时支持任意 name 落到独立目录
+    // （如 worker 内的业务 logger createLogger({ name: 'weixinapi' }) -> logs/weixinapi/）。
+    if (!isMainThread) {
+        return createWorkerProxy(name)
+    }
+
     const {
-        name = 'app',
         dirname,
         level = 'info',
         format = defaultLogFormat,
@@ -89,15 +136,11 @@ export function createLogger(options = {}) {
 
     const transports = []
 
-    if (console) {
+    if (console)
         transports.push(new winston.transports.Console())
-    }
 
     if (file) {
-        const splitLevels = Array.isArray(split)
-            ? split
-            : (split ? defaultSplitLevels : null)
-
+        const splitLevels = split ? defaultSplitLevels : null
         if (splitLevels) {
             for (const splitLevel of splitLevels) {
                 transports.push(createFileTransport(`${name}-${splitLevel}-%DATE%.log`, splitLevel))
@@ -107,7 +150,7 @@ export function createLogger(options = {}) {
         }
     }
 
-    return winston.createLogger({
+    const logger = winston.createLogger({
         level,
         format: combine(
             timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
@@ -115,6 +158,17 @@ export function createLogger(options = {}) {
         ),
         transports
     })
+
+    // 手动挂载一个安全的 close 方法
+    logger.close = function () {
+        if (this.transports) {
+            for (const t of this.transports) {
+                if (typeof t.close === 'function') t.close()
+            }
+        }
+    }
+
+    return logger
 }
 
 export default createLogger

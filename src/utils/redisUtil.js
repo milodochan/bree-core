@@ -3,7 +3,6 @@ import { getRedis, closeRedis } from '../core/redis.js'
 class RedisHelper {
     async set(key, value, expireSeconds = null) {
         const redis = await getRedis()
-
         const data =
             typeof value === 'object'
                 ? JSON.stringify(value)
@@ -18,18 +17,18 @@ class RedisHelper {
         return await redis.set(key, data)
     }
 
-    async get(key) {
+    async get(key, json = false) {
         const redis = await getRedis()
-
         const value = await redis.get(key)
-
         if (!value) return null
-
-        try {
-            return JSON.parse(value)
-        } catch {
-            return value
+        if (json) {
+            try {
+                return JSON.parse(value)
+            } catch {
+                return value
+            }
         }
+        return value
     }
 
     async del(key) {
@@ -64,7 +63,6 @@ class RedisHelper {
 
     async hSet(key, field, value) {
         const redis = await getRedis()
-
         return await redis.hSet(
             key,
             field,
@@ -74,18 +72,18 @@ class RedisHelper {
         )
     }
 
-    async hGet(key, field) {
+    async hGet(key, field, json = false) {
         const redis = await getRedis()
-
         const value = await redis.hGet(key, field)
-
         if (!value) return null
-
-        try {
-            return JSON.parse(value)
-        } catch {
-            return value
+        if (json) {
+            try {
+                return JSON.parse(value)
+            } catch {
+                return value
+            }
         }
+        return value
     }
 
     async hGetAll(key) {

@@ -1,7 +1,7 @@
 import express from 'express'
-import { readdir } from 'fs/promises'
-import path from 'path'
-import { pathToFileURL } from 'url'
+import { readdir } from 'node:fs/promises'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { createLogger } from '../config/createLogger.js'
 import { auth } from './auth.js'
 import { getRegisteredRoutes } from './route.js'
@@ -14,6 +14,7 @@ const loadRouteFiles = async (dirs, logger) => {
     const list = Array.isArray(dirs) ? dirs : [dirs]
     let total = 0
 
+    /* eslint-disable no-await-in-loop */
     for (const dir of list) {
         const abs = path.resolve(dir)
         let entries
@@ -92,7 +93,7 @@ export function useServer(options = {}) {
     const {
         port = 3000,
         host = '0.0.0.0',
-        logger = createLogger({ name: 'server', split: true }),
+        logger = createLogger({ name: 'server' }),
         jsonLimit = '10mb',
         urlencodedLimit = '10mb',
         cors = true,

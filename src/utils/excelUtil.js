@@ -78,10 +78,10 @@ const createStreamExcel = async (columns, data, fileName = 'report', lastWrite =
         streamWorkbook = new ExcelJS.stream.xlsx.WorkbookWriter({
             filename: filePath,
             useStyles: false,
-            useSharedStrings: true
+            useSharedStrings: false
         })
 
-        streamSheet = workbook.addWorksheet('Report')
+        streamSheet = streamWorkbook.addWorksheet('Report')
         streamSheet.columns = columns
     }
     for (const item of data) {
@@ -89,7 +89,7 @@ const createStreamExcel = async (columns, data, fileName = 'report', lastWrite =
     }
 
     if (lastWrite) {
-        await workbook.commit()
+        await streamWorkbook.commit()
         streamWorkbook = null
         streamSheet = null
     }

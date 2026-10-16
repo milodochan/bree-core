@@ -33,7 +33,15 @@ const send = async (subject, toUser = '', copyUser = '', content = '', filePath 
     })
 }
 
+const close = async () => {
+    if (transporter) {
+        await transporter.close()
+        transporter = null
+    }
+}
+
 export default {
     init,
-    send
+    send,
+    close
 }

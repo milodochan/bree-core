@@ -5,7 +5,7 @@ import { useDatabase } from '../utils/databaseUtil.js'
 
 export function useHandler() {
     let isCancelled = false
-    const logger = createLogger({ name: 'worker' })
+    let enableDb = true
 
     if (parentPort)
         parentPort.once('message', (message) => {
@@ -17,33 +17,67 @@ export function useHandler() {
         })
 
     const getIsCancelled = () => isCancelled
+    const disabledDb = () => enableDb = false
     const run = async (worker) => {
+        let logger = createLogger({ name: 'worker' })
         if (typeof worker !== 'function') {
             logger.error(`run worker is not a function`)
             return
         }
 
+        let db = null
         let close = null
+        let result
+        let workerError = null
         try {
-            const database = await useDatabase()
-            const db = database.db
-            close = database.close
-            const result = await worker({ logger, redis, db, workerData })
-            if (parentPort) parentPort.postMessage({ type: 'complete', data: result })
+            if (enableDb) {
+                const database = await useDatabase()
+                db = database.db
+                close = database.close
+            }
+            result = await worker({ logger, redis, db, requestData: workerData?.requestData })
         }
         catch (error) {
-            logger.error(`worker=>${error?.stack || error?.message || error}`)
+            workerError = error   // 先保存，避免被 finally 覆盖
         }
         finally {
             try {
-                await close?.()
-            } catch (error) {
-                logger.error(`database close=>${error?.stack || error?.message || error}`)
+                if (enableDb) {
+                    await Promise.race([
+                        close?.(),
+                        new Promise((_, reject) =>
+                            setTimeout(() => reject(new Error('close timeout')), 5000)
+                        )
+                    ])
+                }
+            } catch (e) {
+                logger.error(`close[database]=>${e?.message || e}`)
             }
-            if (parentPort) parentPort.postMessage('done')
-            else process.exit(0)
+            try {
+                await redis.close()
+            } catch (error) {
+                logger.error(`close[redis]=>${error?.stack || error?.message || error}`)
+            }
+
+            db = null
+            close = null
         }
+
+        if (workerError) {
+            // if (parentPort) parentPort.postMessage({ type: 'error', data: workerError.stack || workerError.message || workerError })
+            result = null
+            logger = null
+            throw workerError
+        }
+
+        if (parentPort) {
+            parentPort.postMessage({ type: 'complete', data: result })
+            result = null
+            logger = null
+            parentPort.postMessage('done')
+        }
+        else process.exit(0)
     }
 
-    return { run, getIsCancelled }
+    return { run, getIsCancelled, disabledDb }
 }

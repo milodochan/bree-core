@@ -62,7 +62,9 @@ const joinPath = (prefix, path) => {
 const resolveArgs = (...args) => {
     let method = null
     // 末尾若为合法方法字符串，视为 method（兼容 route(path, handler, method)）
-    if (typeof args[args.length - 1] === 'string' && ['get', 'post', 'put', 'delete', 'patch'].includes(args[args.length - 1].toLowerCase())) {
+    // 末尾若为合法方法字符串，视为 method（兼容 route(path, handler, method)）
+    const lastArg = args.at(-1)
+    if (typeof lastArg === 'string' && ['get', 'post', 'put', 'delete', 'patch'].includes(lastArg.toLowerCase())) {
         method = args.pop()
     }
     const handler = args.pop()
@@ -78,11 +80,14 @@ const createRoute = (path, middlewares, handler, method) => {
         handler: async (req, res, next) => {
             try {
                 // 先执行引用者中间件（Express 风格 (req, res, next)，如 multer 的 upload.single('file')）
-                for (const mw of middlewares) {
-                    await new Promise((resolve, reject) => {
-                        mw(req, res, (err) => (err ? reject(err) : resolve()))
-                    })
-                }
+                await Promise.all(
+                    middlewares.map(
+                        (mw) =>
+                            new Promise((resolve, reject) => {
+                                mw(req, res, (err) => (err ? reject(err) : resolve()))
+                            })
+                    )
+                )
                 const body = { ...req.params, ...req.query, ...req.body }
                 const result = await handler(body, req, res)
                 if (!res.headersSent) {
