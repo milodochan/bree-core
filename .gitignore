@@ -2,6 +2,7 @@
 /node_modules/
 # Build output
 /dist/
+/logs/
 # 忽略vite的临时配置文件
 /vite.config.js.timestamp-*
 # 忽略 IDE 配置文件
