@@ -1,7 +1,0 @@
-[2026-08-24 16:58:23] [INFO] Server listening on http://127.0.0.1:0
-[2026-08-24 16:58:23] [INFO] GET /smoke-src 404 5ms 127.0.0.1
-[2026-08-24 16:58:30] [INFO] Server listening on http://127.0.0.1:0
-[2026-08-24 16:58:30] [INFO] GET /smoke-src 404 4ms 127.0.0.1
-[2026-08-24 16:58:35] [INFO] auto-loaded 1 routes file(s)
-[2026-08-24 16:58:35] [INFO] Server listening on http://127.0.0.1:0
-[2026-08-24 16:58:35] [INFO] GET /smoke-src 200 4ms 127.0.0.1

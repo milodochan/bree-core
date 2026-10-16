@@ -1,2 +1,0 @@
-[2026-08-24 16:58:23] [ERROR] load routes file failed: E:\Projects\git\bree-core\src\routes\tmp_smoke.js - Cannot find module 'E:\Projects\git\bree-core\index.js' imported from E:\Projects\git\bree-core\src\routes\tmp_smoke.js
-[2026-08-24 16:58:30] [ERROR] load routes file failed: E:\Projects\git\bree-core\src\routes\tmp_smoke.js - The requested module '../core/route.js' does not provide an export named 'route'
